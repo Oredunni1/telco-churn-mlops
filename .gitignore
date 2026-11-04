@@ -9,3 +9,5 @@ __pycache__/
 .ipynb_checkpoints/
 models/
 .env
+mlflow.db
+mlflow.db-journal
