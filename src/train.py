@@ -1,4 +1,4 @@
-"""Train baseline churn model. Reports ROC-AUC, Precision, Recall, F1 via stratified CV, logs to MLflow.
+"""Train and compare baseline churn models (LR / RF / GB). Reports ROC-AUC, Precision, Recall, F1 via stratified CV, logs to MLflow.
 
 Design Considerations:
 1. Preprocess the dataset from the import of the feature, combined with the model instantiation in a pipeline 
@@ -9,6 +9,7 @@ Design Considerations:
 import mlflow
 import mlflow.sklearn
 import pandas as pd
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     classification_report,
@@ -23,34 +24,17 @@ from sklearn.pipeline import Pipeline
 
 from src import data, features
 
-
 TEST_SIZE = 0.20
 CV_SPLITS = 5
-
 MLFLOW_DB_URI = f"sqlite:///{data.BASE_DIR}/mlflow.db"
 
-def train_baseline():
-    mlflow.set_tracking_uri(MLFLOW_DB_URI)
-    mlflow.set_experiment("telco-churn")
-    # Load and Split
-    df = pd.read_parquet(data.DATA_PROCESS_FILE)
-    X = df.drop("Churn", axis=1)
-    y = df["Churn"]
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=TEST_SIZE, random_state=42, stratify=y
-    )
-
-    # Build the Pipeline.
+def train_model(run_name: str, estimator, X_train, y_train, X_test, y_test):
+    # Build the Pipeline
     pipe = Pipeline(
         [
             ("preprocessor", features.build_preprocessor()),
-            (
-                "classifier",
-                LogisticRegression(
-                    max_iter=1000, class_weight="balanced", random_state=42
-                ),
-            ),
+            ('classifier', estimator),
         ]
     )
 
@@ -64,8 +48,16 @@ def train_baseline():
 
     # Fit the model for training
     pipe.fit(X_train, y_train)
-    n_iters = pipe.named_steps["classifier"].n_iter_[0]
-    print(f"Converged in {n_iters} iterations")
+
+    # Safe iteration extraction (only LogisticRegression has n_iter_)
+    trained_estimator = pipe.named_steps['classifier']
+    n_iters = (
+        trained_estimator.n_iter_[0]
+        if hasattr(trained_estimator, "n_iter_")
+        else None
+    )
+    if n_iters is not None:
+        print(f"[{run_name}] Converged in {n_iters} iterations")
 
     # Predictions
     y_pred_proba = pipe.predict_proba(X_test)[:, 1]
@@ -79,12 +71,25 @@ def train_baseline():
     cm = confusion_matrix(y_test, y_pred)
 
     # --- MLFLOW TRACKING BLOCK ---
-    with mlflow.start_run(run_name="logreg_balanced"):
-        # Log Parameters
-        mlflow.log_param("model_type", "LogisticRegression")
-        mlflow.log_param("class_weight", pipe.named_steps['classifier'].class_weight)
-        mlflow.log_param("max_iter", pipe.named_steps['classifier'].max_iter)
-        mlflow.log_param("n_iterations", n_iters)
+    with mlflow.start_run(run_name=run_name):
+        mlflow.set_tag(
+            "model_family",
+            (
+                "linear"
+                if isinstance(estimator, LogisticRegression)
+                else "tree"
+            ),
+        )
+
+        # Log Parameters safely
+        mlflow.log_param("model_type", type(estimator).__name__)
+        mlflow.log_param("n_estimators", getattr(estimator, "n_estimators", "N/A"))
+        mlflow.log_param(
+            "class_weight", getattr(estimator, "class_weight", "N/A")
+        )
+        mlflow.log_param("max_iter", getattr(estimator, "max_iter", "N/A"))
+        if n_iters is not None:
+            mlflow.log_param("n_iterations", n_iters)
         mlflow.log_param("test_size", TEST_SIZE)
         mlflow.log_param("cv_splits", CV_SPLITS)
 
@@ -96,29 +101,64 @@ def train_baseline():
         mlflow.log_metric("test_recall", recall)
         mlflow.log_metric("test_f1", f1)
 
-        # Log Model Artifact
-        mlflow.sklearn.log_model(pipe, name="model")
+        # Log Model Artifact & Text Reports
+        # skops blocks tree types by default (raw node indices are a documented security concern),
+        # but this model was trained in-process from our own code — safe to trust.
+        mlflow.sklearn.log_model(
+            pipe, 
+            name="model",
+            # Tree-based estimators store raw node indices (a documented skops security concern),
+            # but this model was trained in-process from our own code — safe to trust.
+            skops_trusted_types=["sklearn.tree._tree.Tree"],
+        )
         mlflow.log_text(str(cm), "confusion_matrix.txt")
-        mlflow.log_text(classification_report(y_test, y_pred), "classification_report.txt")
+        mlflow.log_text(
+            classification_report(y_test, y_pred), "classification_report.txt"
+        )
 
     # Print summary report for visibility
-    print("\n--- Cross-Validation Evaluation ---")
+    print(f"\n=== Results for {run_name} ===")
     print(f"CV ROC-AUC Mean: {cv_mean:.4f} (+/- {cv_std:.4f})")
-
-    print("\n--- Test Set Evaluation ---")
-    print(f"ROC-AUC:   {roc:.4f}")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall:    {recall:.4f}")
-    print(f"F1-Score:  {f1:.4f}\n")
-    print("Confusion Matrix:")
-    print(cm)
-    print("\nClassification Report:")
-    print(classification_report(y_test, y_pred))
+    print(f"Test ROC-AUC:    {roc:.4f}")
+    print(f"Test Precision:  {precision:.4f}")
+    print(f"Test Recall:     {recall:.4f}")
+    print(f"Test F1-Score:   {f1:.4f}\n")
 
     return {
-        "roc_auc": roc, "precision": precision, "recall": recall, "f1": f1, "cm": cm,
+        "roc_auc": roc,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "cm": cm,
     }
 
 
 if __name__ == "__main__":
-    train_baseline()
+    mlflow.set_tracking_uri(MLFLOW_DB_URI)
+    mlflow.set_experiment("telco-churn")
+
+    # Load and Split
+    df = pd.read_parquet(data.DATA_PROCESS_FILE)
+    X = df.drop("Churn", axis=1)
+    y = df["Churn"]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=TEST_SIZE, random_state=42, stratify=y
+    )
+
+    models = [
+        (
+            "logreg_balanced",
+            LogisticRegression(
+                max_iter=1000, class_weight="balanced", random_state=42
+            ),
+        ),
+        (
+            "random_forest",
+            RandomForestClassifier(class_weight="balanced", random_state=42),
+        ),
+        ("gradient_boost", GradientBoostingClassifier(random_state=42)),
+    ]
+
+    for name, est in models:
+        train_model(name, est, X_train, y_train, X_test, y_test)
