@@ -9,21 +9,16 @@ Customer churn is a critical revenue drain in the telecommunications industry. T
 ## 2. Data
 
 * **Source:** Processed Telco customer dataset (`data/processed/telco_clean.parquet`).
-
 * **Class Distribution:** Imbalanced target (\~26.5% churn rate, \~73.5% non-churn).
-
 * **Data Quality Guards:** Automated validation checks in `data.py` enforcing strict row bounds, type safety, and explicit expected churn rate guardrails.
 
 ## 3. Approach
 
 * **Pipeline Encapsulation:** Preprocessing steps (scaling and encoding) are strictly coupled inside scikit-learn `Pipeline` objects to eliminate data leakage during cross-validation. (Note: Missing value handling for numerical columns like `TotalCharges` is cleanly handled upstream in `data.py`).
-
 * **Stratified K-Fold CV:** Implemented 5-fold stratified cross-validation (`StratifiedKFold`) to preserve the 26.5% minority class ratio across every fold and yield stable out-of-fold performance estimates.
-
+* **Hyperparameter Tuning & CV Metric Integrity:** Regularization strength ($C$) is evaluated inside cross-validation via `GridSearchCV`. For the tuned model (`logreg_tuned`), `cv_roc_auc_mean` is logged directly from `grid_search.best_score_`—reflecting the true mean cross-validation ROC-AUC of the winning hyperparameter combination—rather than calling `cross_val_score` on the un-tuned base pipeline (which would erroneously report the default $C=1.0$ baseline score).
 * **Class Imbalance Strategy:** Applied `class_weight='balanced'` to inversely weight classes for Logistic Regression and Random Forest, forcing models to prioritize minority 'Yes' churners.
-
   * *Note on Comparability:* `class_weight='balanced'` was applied to LR and RF, but not to Gradient Boosting (`GradientBoostingClassifier` does not natively expose `class_weight`, and explicit sample-weighting was omitted). GB's lower recall (0.52 vs LR's 0.78) partly reflects this difference in imbalance handling; the relative ranking would likely be preserved under equal treatment, but the recall gap would narrow.
-
 * **Experiment Tracking:** Integrated MLflow (`sqlite:///{data.BASE_DIR}/mlflow.db`) to systematically log parameters, metrics, classification reports, confusion matrices, and version-controlled model artifacts.
 
 ## 4. Results & Model Selection Analysis
@@ -32,11 +27,16 @@ Accuracy is explicitly rejected as a primary evaluation metric—a naive baselin
 
 ### Model Performance Comparison
 
-| Model | CV AUC | Test AUC | Precision | Recall | F1 | Verdict | 
-| ----- | ----- | ----- | ----- | ----- | ----- | ----- | 
-| **`logreg_balanced`** | **0.8460 ± 0.012** | **0.8415** | **0.5043** | **0.7834** | **0.6136** | **Best Recall + F1 (Business Winner)** | 
-| `random_forest` | 0.8224 ± 0.011 | 0.8198 | 0.5486 | 0.6337 | 0.5881 | Middle | 
-| `gradient_boost` | 0.8483 ± 0.013 | 0.8433 | 0.6655 | 0.5160 | 0.5813 | Best AUC + Precision | 
+| Model | CV AUC | Test AUC | Precision | Recall | F1 | Verdict |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **`logreg_balanced`** | **0.8460 ± 0.012** | **0.8415** | **0.5043** | **0.7834** | **0.6136** | **Baseline (Business Winner)** |
+| `logreg_tuned` | 0.8462 ± 0.013 | 0.8407 | 0.5043 | 0.7834 | 0.6136 | Tuned — no meaningful improvement |
+| `random_forest` | 0.8224 ± 0.011 | 0.8198 | 0.5486 | 0.6337 | 0.5881 | Middle |
+| `gradient_boost` | 0.8483 ± 0.013 | 0.8433 | 0.6655 | 0.5160 | 0.5813 | Best AUC + Precision |
+
+### Hyperparameter Tuning Findings (`logreg_tuned`)
+
+A `GridSearchCV` sweep across $C \in \{0.01, 0.1, 1, 10, 100\}$ using 5-fold stratified cross-validation selected $C = 10$ (weaker regularization) with a mean CV ROC-AUC of $0.8462 \pm 0.0127$—virtually identical to the $C = 1.0$ baseline's $0.8460 \pm 0.0124$, while slightly increasing cross-validation variance. On the holdout test set, ROC-AUC moved marginally downward from $0.8415$ (baseline) to $0.8407$ (tuned)—a delta of $-0.0008$ well within CV noise—while all thresholded metrics (precision, recall, and F1) remained identical to four decimal places. This illustrates the classic winner's curse in hyperparameter selection: relaxing regularization to $C = 10$ chased minor variance in the CV folds without yielding transferable generalization on unseen data. Retaining $C = 1.0$ is an evidence-backed decision: tuning found no transferable improvement.
 
 ### Why Logistic Regression is the Business Winner
 
@@ -45,16 +45,13 @@ While Gradient Boosting edges out Logistic Regression on raw Test ROC-AUC (0.843
 However, their **Recall and Precision profiles diverge dramatically**:
 
 * **Gradient Boosting** catches 51.6% of churners (\~193 True Positives out of 374 actual churners in the test set).
-
 * **Logistic Regression (`logreg_balanced`)** catches 78.3% of churners (\~293 True Positives out of 374 actual churners).
 
 #### Financial & Business Impact Analysis:
 
 * **Additional Churners Caught:** LR identifies **\~100 more churners** in the test set than GB (293 vs. 193). At an assumed Customer Lifetime Value (LTV) of **\$500**, this yields **\~\$50,000 in additional retained revenue**.
-
 * **Cost of False Alarms:** LR trades away precision (0.5043 vs 0.6655), resulting in 288 false positives compared to GB's \~97 false positives (**191 additional false retention offers**). At **\$50 per retention offer**, this adds **\$9,550 in extra marketing spend** (\$50 × 191).
-
-* **Net Expected Value:** Logistic Regression wins by **\~\$40,450 in net expected value** (\$50,000 retained revenue - $9,550 marketing spend), directly satisfying our core business mandate: *missing a churner costs more than a wasted retention offer*.
+* **Net Expected Value:** Logistic Regression wins by **\~\$40,450 in net expected value** (\$50,000 retained revenue - \$9,550 marketing spend), directly satisfying our core business mandate: *missing a churner costs more than a wasted retention offer*.
 
 ## 5. How to Run
 
@@ -86,5 +83,4 @@ This project uses `uv` for lightning-fast dependency management and environment 
 ## 7. Limitations
 
 * **Precision Tradeoff:** Prioritizing high recall results in a \~50% precision rate, generating false alarms that increase marketing overhead for non-churning customers who receive unnecessary retention incentives.
-
 * **Linear Boundary Constraint:** Logistic Regression relies on linear decision boundaries; highly non-linear feature interactions may require future exploration with tuned tree ensembles once business constraints allow for lower recall thresholds.
