@@ -1,10 +1,4 @@
-"""Train and compare baseline churn models (LR / RF / GB). Reports ROC-AUC, Precision, Recall, F1 via stratified CV, logs to MLflow.
-
-Design Considerations:
-1. Preprocess the dataset from the import of the feature, combined with the model instantiation in a pipeline 
-2. class_weight='balanced' reweights each class by inverse frequency — with ~26.5% churn, the minority 'Yes' class gets more weight per example, so the model favors recall on churners at the cost of precision.
-3. All MLflow logs are stated, including the log_param, log_metric and model artifact
-"""
+"""Train and compare baseline churn models (LR / RF / GB). Reports ROC-AUC, Precision, Recall, F1 via stratified CV, logs to MLflow."""
 
 import mlflow
 import mlflow.sklearn
@@ -29,20 +23,21 @@ CV_SPLITS = 5
 MLFLOW_DB_URI = f"sqlite:///{data.BASE_DIR}/mlflow.db"
 
 
-def train_model(run_name: str, estimator, X_train, y_train, X_test, y_test):
-    # Build the Pipeline
-    pipe = Pipeline(
-        [
-            ("preprocessor", features.build_preprocessor()),
-            ('classifier', estimator),
-        ]
-    )
+def compute_metrics(
+    pipe: Pipeline,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+) -> dict:
+    """Compute cross-validation scores, fit the pipeline, and evaluate test metrics.
 
+    Completely decoupled from MLflow for pure testability.
+    """
     # Cross-validation
     cv = StratifiedKFold(n_splits=CV_SPLITS, shuffle=True, random_state=42)
     cv_scores = cross_val_score(pipe, X_train, y_train, cv=cv, scoring="roc_auc")
 
-    # Aggregate CV scores
     cv_mean = cv_scores.mean()
     cv_std = cv_scores.std()
 
@@ -50,14 +45,12 @@ def train_model(run_name: str, estimator, X_train, y_train, X_test, y_test):
     pipe.fit(X_train, y_train)
 
     # Safe iteration extraction (only LogisticRegression has n_iter_)
-    trained_estimator = pipe.named_steps['classifier']
+    trained_estimator = pipe.named_steps["classifier"]
     n_iters = (
         trained_estimator.n_iter_[0]
         if hasattr(trained_estimator, "n_iter_")
         else None
     )
-    if n_iters is not None:
-        print(f"[{run_name}] Converged in {n_iters} iterations")
 
     # Predictions
     y_pred_proba = pipe.predict_proba(X_test)[:, 1]
@@ -69,68 +62,83 @@ def train_model(run_name: str, estimator, X_train, y_train, X_test, y_test):
     recall = recall_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred)
     cm = confusion_matrix(y_test, y_pred)
+    class_report = classification_report(y_test, y_pred)
+
+    return {
+        "pipe": pipe,
+        "cv_roc_auc_mean": cv_mean,
+        "cv_roc_auc_std": cv_std,
+        "test_roc_auc": roc,
+        "test_precision": precision,
+        "test_recall": recall,
+        "test_f1": f1,
+        "confusion_matrix": cm,
+        "classification_report": class_report,
+        "n_iterations": n_iters,
+    }
+
+
+def train_model(
+    run_name: str,
+    estimator,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+):
+    """Build the pipeline, compute metrics via compute_metrics, and log to MLflow."""
+    # Build the Pipeline
+    pipe = Pipeline(
+        [
+            ("preprocessor", features.build_preprocessor()),
+            ("classifier", estimator),
+        ]
+    )
+
+    # Compute metrics & fit pipeline (pure ML logic)
+    metrics = compute_metrics(pipe, X_train, y_train, X_test, y_test)
 
     # --- MLFLOW TRACKING BLOCK ---
     with mlflow.start_run(run_name=run_name):
         mlflow.set_tag(
             "model_family",
-            (
-                "linear"
-                if isinstance(estimator, LogisticRegression)
-                else "tree"
-            ),
+            "linear" if isinstance(estimator, LogisticRegression) else "tree",
         )
 
         # Log Parameters safely
         mlflow.log_param("model_type", type(estimator).__name__)
         mlflow.log_param("n_estimators", getattr(estimator, "n_estimators", "N/A"))
-        mlflow.log_param(
-            "class_weight", getattr(estimator, "class_weight", "N/A")
-        )
+        mlflow.log_param("class_weight", getattr(estimator, "class_weight", "N/A"))
         mlflow.log_param("max_iter", getattr(estimator, "max_iter", "N/A"))
-        if n_iters is not None:
-            mlflow.log_param("n_iterations", n_iters)
+        if metrics["n_iterations"] is not None:
+            mlflow.log_param("n_iterations", metrics["n_iterations"])
         mlflow.log_param("test_size", TEST_SIZE)
         mlflow.log_param("cv_splits", CV_SPLITS)
 
         # Log Metrics
-        mlflow.log_metric("cv_roc_auc_mean", cv_mean)
-        mlflow.log_metric("cv_roc_auc_std", cv_std)
-        mlflow.log_metric("test_roc_auc", roc)
-        mlflow.log_metric("test_precision", precision)
-        mlflow.log_metric("test_recall", recall)
-        mlflow.log_metric("test_f1", f1)
+        mlflow.log_metric("cv_roc_auc_mean", metrics["cv_roc_auc_mean"])
+        mlflow.log_metric("cv_roc_auc_std", metrics["cv_roc_auc_std"])
+        mlflow.log_metric("test_roc_auc", metrics["test_roc_auc"])
+        mlflow.log_metric("test_precision", metrics["test_precision"])
+        mlflow.log_metric("test_recall", metrics["test_recall"])
+        mlflow.log_metric("test_f1", metrics["test_f1"])
 
         # Log Model Artifact & Text Reports
-        # skops blocks tree types by default (raw node indices are a documented security concern),
-        # but this model was trained in-process from our own code — safe to trust.
         mlflow.sklearn.log_model(
-            pipe, 
+            metrics["pipe"],
             name="model",
-            # Tree-based estimators store raw node indices (a documented skops security concern),
-            # but this model was trained in-process from our own code — safe to trust.
             skops_trusted_types=["sklearn.tree._tree.Tree"],
         )
-        mlflow.log_text(str(cm), "confusion_matrix.txt")
-        mlflow.log_text(
-            classification_report(y_test, y_pred), "classification_report.txt"
-        )
+        mlflow.log_text(str(metrics["confusion_matrix"]), "confusion_matrix.txt")
+        mlflow.log_text(metrics["classification_report"], "classification_report.txt")
 
     # Print summary report for visibility
     print(f"\n=== Results for {run_name} ===")
-    print(f"CV ROC-AUC Mean: {cv_mean:.4f} (+/- {cv_std:.4f})")
-    print(f"Test ROC-AUC:    {roc:.4f}")
-    print(f"Test Precision:  {precision:.4f}")
-    print(f"Test Recall:     {recall:.4f}")
-    print(f"Test F1-Score:   {f1:.4f}\n")
-
-    return {
-        "roc_auc": roc,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "cm": cm,
-    }
+    print(f"CV ROC-AUC Mean: {metrics['cv_roc_auc_mean']:.4f} (+/- {metrics['cv_roc_auc_std']:.4f})")
+    print(f"Test ROC-AUC:    {metrics['test_roc_auc']:.4f}")
+    print(f"Test Precision:  {metrics['test_precision']:.4f}")
+    print(f"Test Recall:     {metrics['test_recall']:.4f}")
+    print(f"Test F1-Score:   {metrics['test_f1']:.4f}\n")
 
 
 if __name__ == "__main__":

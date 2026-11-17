@@ -8,10 +8,10 @@ DATA_RAW = BASE_DIR / "data" / "raw" / "Telco-Customer-Churn.csv"
 DATA_PROCESS_DIR = BASE_DIR / "data" / "processed"
 DATA_PROCESS_FILE = DATA_PROCESS_DIR / "telco_clean.parquet"
 
-def load_data():
+def load_data(path: Path = DATA_RAW) -> pd.DataFrame:
     """Load and clean the Telco churn dataset into a validated parquet."""
     # read dataset
-    df = pd.read_csv(DATA_RAW)
+    df = pd.read_csv(path)
 
     # coerces TotalCharges
     df['TotalCharges'] = pd.to_numeric(df['TotalCharges'], errors='coerce')
