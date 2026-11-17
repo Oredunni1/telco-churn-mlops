@@ -1,5 +1,7 @@
 # Telco Customer Churn MLOps Pipeline
 
+[![CI](https://github.com/Oredunni1/telco-churn-mlops/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Oredunni1/telco-churn-mlops/actions/workflows/ci.yml)
+
 An end-to-end MLOps architecture designed to predict, evaluate, and track customer churn for telecommunications data. This project emphasizes reproducible data engineering, strict class-imbalance mitigation, and business-aligned model evaluation via MLflow.
 
 ## 1. Problem
