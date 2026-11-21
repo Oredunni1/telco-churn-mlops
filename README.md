@@ -78,7 +78,12 @@ This project uses `uv` for lightning-fast dependency management and environment 
 
 > **Model Artifact Format Note:** MLflow 3.x serializes scikit-learn pipelines using `.skops` (safe serialization rather than legacy pickle). Loading requires `mlflow ≥ 3.0` (or `skops_trusted_types` configuration if loading tree-based artifacts). To load a model programmatically: `mlflow.sklearn.load_model("runs:/<run_id>/model")`.
 
-## 6. Live Demo (TBD)
+## 6. Live Demo
+
+- **Interactive Gradio UI:** [huggingface.co/spaces/ahmedtoyyib1/telco-churn](https://huggingface.co/spaces/ahmedtoyyib1/telco-churn)
+- **FastAPI Endpoint (Local):** Run `uv run uvicorn app.main:app --reload` and visit `http://127.0.0.1:8000/docs`.
+
+*(Note: The deployed model uses a patch to handle sklearn version differences between the training environment (1.9.1) and the Hugging Face CPU environment (1.7.2).)*
 
 *Pending deployment of the model serving endpoint via FastAPI.*
 
