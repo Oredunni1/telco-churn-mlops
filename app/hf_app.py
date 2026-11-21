@@ -21,6 +21,12 @@ MODEL_PATH = BASE_DIR / "models" / "logreg_balanced.pkl"
 THRESHOLD = 0.5
 
 model = joblib.load(MODEL_PATH)
+# Compatibility patch for sklearn version mismatch (trained on 1.9.1, running on 1.7.2)
+if hasattr(model, 'named_steps') and 'classifier' in model.named_steps:
+    clf = model.named_steps['classifier']
+    if not hasattr(clf, 'multi_class'):
+        clf.multi_class = 'auto'
+        
 EXAMPLE = CustomerFeatures.model_config["json_schema_extra"]["examples"][0]
 
 
