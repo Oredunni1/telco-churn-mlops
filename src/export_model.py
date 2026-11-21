@@ -34,7 +34,7 @@ def export_model(
     model = mlflow.sklearn.load_model(f"runs:/{run_id}/model")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(model, output_path)
+    joblib.dump(model, output_path, protocol=4)
     return output_path
 
 
